@@ -1,0 +1,125 @@
+
+import pandas as pd
+import numpy as np
+import hashlib
+from sklearn.ensemble import IsolationForest
+from sklearn.cluster import DBSCAN
+
+# -------------------------
+# Utility: Safe Anonymization
+# -------------------------
+def hash_value(val: str) -> str:
+    """Hash usernames or IPs to preserve privacy."""
+    return hashlib.sha256(val.encode()).hexdigest()[:8]
+
+# -------------------------
+# Layer 1: Data & Discovery
+# -------------------------
+
+def generate_synthetic_logs(n=1000):
+    """Generate fake log data for prototype testing."""
+    logs = pd.DataFrame({
+        "timestamp": pd.date_range("2025-09-01", periods=n, freq="T"),
+        "user": np.random.choice(["alice", "bob", "charlie", "david"], size=n),
+        "ip": np.random.choice(["10.0.0.1", "10.0.0.2", "192.168.1.5", "172.16.0.3"], size=n),
+        "event_type": np.random.choice(["login","logoff"], size=n)
+    })
+
+    # anonymize usernames and IPs
+    logs["user"] = logs["user"].apply(hash_value)
+    logs["ip"] = logs["ip"].apply(hash_value)
+    return logs
+
+def feature_engineering(logs: pd.DataFrame) -> pd.DataFrame:
+    """Extract statistical features per 5-min window."""
+    logs['timestamp'] = pd.to_datetime(logs['timestamp'])
+    logs.set_index('timestamp', inplace=True)
+
+    grouped = logs.resample("5T")
+
+    features = pd.DataFrame({
+        "event_count": grouped.size(),
+        "unique_users": grouped['user'].nunique(),
+        "unique_ips": grouped['ip'].nunique(),
+        "failed_logins": grouped.apply(lambda x: (x['event_type'] == "failed_login").sum()),
+        "burstiness": grouped.size() / (grouped.size().mean() + 1)
+    })
+    return features.fillna(0)
+
+def anomaly_detection(features: pd.DataFrame):
+    """Detect anomalies using Isolation Forest + cluster discovery."""
+    iso = IsolationForest(contamination=0.05, random_state=42)
+    preds = iso.fit_predict(features)
+
+    # DBSCAN to detect new/unknown patterns
+    clustering = DBSCAN(eps=0.5, min_samples=5).fit(features)
+    cluster_labels = clustering.labels_
+
+    return pd.Series(preds, index=features.index), pd.Series(cluster_labels, index=features.index)
+
+# -------------------------------
+# Layer 2: Validation & Benchmark
+# -------------------------------
+
+def validate_metrics(features: pd.DataFrame, anomalies: pd.Series):
+    """Simple validation of anomalies vs basic metrics."""
+    return {
+        "avg_event_rate": round(features["event_count"].mean(), 2),
+        "anomaly_rate": round((anomalies == -1).mean(), 2),
+        "avg_failed_logins": round(features["failed_logins"].mean(), 2)
+    }
+
+# ------------------------------------------
+# Layer 3: Log ↔ Non-Log Metrics Integration
+# ------------------------------------------
+
+def pair_metrics(log_metrics: dict, nonlog_metrics: dict):
+    """Combine log (incident) and non-log (posture) metrics."""
+    return {**log_metrics, **nonlog_metrics}
+
+# -------------------------------
+# Layer 4: Business Correlation
+# -------------------------------
+
+def correlate_with_business(metrics: dict, business_outcomes: dict):
+    """Simulate correlation between security metrics and business KPIs."""
+    correlations = {}
+    for k, v in metrics.items():
+        for b, bv in business_outcomes.items():
+            try:
+                correlations[(k, b)] = round(np.corrcoef([v], [bv])[0, 1], 2)
+            except Exception:
+                correlations[(k, b)] = 0
+    return correlations
+
+# -------------------------------
+# Prototype Run
+# -------------------------------
+if __name__ == "__main__":
+    # Generate logs
+    logs = generate_synthetic_logs(1000)
+
+    # Layer 1
+    features = feature_engineering(logs)
+    anomalies, clusters = anomaly_detection(features)
+
+    # Layer 2
+    log_metrics = validate_metrics(features, anomalies)
+
+    # Layer 3 (pairing with posture metrics)
+    nonlog_metrics = {"patch_compliance": 0.82, "MFA_coverage": 0.91, "backup_success_rate": 0.95}
+    combined_metrics = pair_metrics(log_metrics, nonlog_metrics)
+
+   # Layer 4 (simulate business outcomes)
+business_outcomes = {"uptime": 0.997, "revenue_growth": 0.05, "incident_cost_reduction": 0.12}
+correlations = correlate_with_business(combined_metrics, business_outcomes)
+
+print("\n🔹 Sample Logs:\n", logs.head())
+print("\n🔹 Engineered Features:\n", features.head())
+print("\n🔹 Log Metrics:", log_metrics)
+print("\n🔹 Combined Metrics:", combined_metrics)
+
+# ✅ only this, no dictionary dump
+print("\n🔹 Business Correlations:")
+for (metric, outcome), corr in correlations.items():
+    print(f"   {metric} ↔ {outcome}: {corr}")

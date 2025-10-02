@@ -1,0 +1,164 @@
+import os
+import numpy as np
+import torch
+import torch.nn as nn
+from transformers import AutoTokenizer, AutoModel
+from sklearn.preprocessing import normalize
+from sklearn.ensemble import IsolationForest
+import joblib
+
+# --------------------------
+# Paths
+# --------------------------
+MODEL_DIR = "models"
+AE_PATH = os.path.join(MODEL_DIR, "autoencoder_checkpoint.pth")
+IF_PATH = os.path.join(MODEL_DIR, "isoforest.joblib")
+os.makedirs(MODEL_DIR, exist_ok=True)
+
+# --------------------------
+# Load BERT
+# --------------------------
+model_name = "bert-base-uncased"
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+bert_model = AutoModel.from_pretrained(model_name)
+
+def get_bert_embeddings(sentences, tokenizer, model):
+    """Convert logs to BERT embeddings"""
+    inputs = tokenizer(sentences, return_tensors="pt", padding=True, truncation=True, max_length=128)
+    with torch.no_grad():
+        outputs = model(**inputs)
+    embeddings = outputs.last_hidden_state[:, 0, :].numpy()
+    return normalize(embeddings, norm='l2')
+
+# --------------------------
+# Autoencoder Definition
+# --------------------------
+class Autoencoder(nn.Module):
+    def __init__(self, input_dim, latent_dim=64):
+        super(Autoencoder, self).__init__()
+        self.encoder = nn.Sequential(
+            nn.Linear(input_dim, 256), nn.ReLU(),
+            nn.Linear(256, latent_dim), nn.ReLU()
+        )
+        self.decoder = nn.Sequential(
+            nn.Linear(latent_dim, 256), nn.ReLU(),
+            nn.Linear(256, input_dim)
+        )
+    def forward(self, x):
+        latent = self.encoder(x)
+        reconstructed = self.decoder(latent)
+        return reconstructed, latent
+
+# --------------------------
+# Train or Load Models
+# --------------------------
+def load_or_train_models(train_logs, incremental=False):
+    embeddings = get_bert_embeddings(train_logs, tokenizer, bert_model)
+    input_dim = embeddings.shape[1]
+
+    autoencoder = Autoencoder(input_dim)
+    optimizer = torch.optim.Adam(autoencoder.parameters(), lr=0.001)
+    criterion = nn.MSELoss()
+
+    if os.path.exists(AE_PATH) and os.path.exists(IF_PATH):
+        print("✅ Loading existing models...")
+        checkpoint = torch.load(AE_PATH)
+        autoencoder.load_state_dict(checkpoint["model_state"])
+        optimizer.load_state_dict(checkpoint["optimizer_state"])
+        iso_forest = joblib.load(IF_PATH)
+
+        if incremental:
+            print("⚡ Incremental training with new logs...")
+            X_train = torch.tensor(embeddings, dtype=torch.float32)
+            for epoch in range(10):  # few extra epochs
+                optimizer.zero_grad()
+                reconstructed, _ = autoencoder(X_train)
+                loss = criterion(reconstructed, X_train)
+                loss.backward()
+                optimizer.step()
+            print("Incremental training done, loss:", loss.item())
+
+            with torch.no_grad():
+                _, latent_train = autoencoder(X_train)
+            iso_forest.fit(latent_train.numpy())
+
+            # Save updated models
+            torch.save({
+                "model_state": autoencoder.state_dict(),
+                "optimizer_state": optimizer.state_dict()
+            }, AE_PATH)
+            joblib.dump(iso_forest, IF_PATH)
+            print("✅ Models updated and saved.")
+
+    else:
+        print("⚡ Training new models from scratch...")
+        X_train = torch.tensor(embeddings, dtype=torch.float32)
+        for epoch in range(30):
+            optimizer.zero_grad()
+            reconstructed, _ = autoencoder(X_train)
+            loss = criterion(reconstructed, X_train)
+            loss.backward()
+            optimizer.step()
+        print("Autoencoder trained, final loss:", loss.item())
+
+        with torch.no_grad():
+            _, latent_train = autoencoder(X_train)
+
+        iso_forest = IsolationForest(n_estimators=200, contamination=0.1, random_state=42)
+        iso_forest.fit(latent_train.numpy())
+
+        # Save models
+        torch.save({
+            "model_state": autoencoder.state_dict(),
+            "optimizer_state": optimizer.state_dict()
+        }, AE_PATH)
+        joblib.dump(iso_forest, IF_PATH)
+        print(f"✅ Models saved in {MODEL_DIR}")
+
+    return autoencoder, iso_forest
+
+# --------------------------
+# Streaming Log Scoring
+# --------------------------
+def score_log(log_line, autoencoder, iso_forest):
+    emb = get_bert_embeddings([log_line], tokenizer, bert_model)
+    X = torch.tensor(emb, dtype=torch.float32)
+
+    with torch.no_grad():
+        reconstructed, latent = autoencoder(X)
+        error = torch.mean((X - reconstructed) ** 2, dim=1).item()
+
+    pred = iso_forest.predict(latent.numpy())[0]  # -1 anomaly, 1 normal
+    result = {
+        "log": log_line,
+        "reconstruction_error": error,
+        "iforest_label": int(pred),  # -1 anomaly
+        "final_label": "ANOMALY" if (pred == -1 or error > 0.05) else "NORMAL"
+    }
+    return result
+
+# --------------------------
+# Example Usage
+# --------------------------
+if __name__ == "__main__":
+    # Historical training logs
+    train_logs = [
+        "User logged in successfully",
+        "Database query executed",
+        "VPN session started",
+        "File uploaded by user",
+        "System backup completed"
+    ]
+
+    autoencoder, iso_forest = load_or_train_models(train_logs, incremental=True)
+
+    # Streaming logs
+    stream_logs = [
+        "Failed password for admin",
+        "Database connection error",
+        "VPN session started",
+        "Firewall DROP TCP connection"
+    ]
+
+    for log in stream_logs:
+        print(score_log(log, autoencoder, iso_forest))
