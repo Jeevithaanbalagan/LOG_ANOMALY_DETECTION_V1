@@ -1,0 +1,13 @@
+Metric↔Business,Correlation
+"('avg_event_rate', 'uptime')",0
+"('avg_event_rate', 'revenue_growth')",0
+"('anomaly_fraction', 'uptime')",0
+"('anomaly_fraction', 'revenue_growth')",0
+"('avg_failed_logins', 'uptime')",0
+"('avg_failed_logins', 'revenue_growth')",0
+"('patch_compliance', 'uptime')",0
+"('patch_compliance', 'revenue_growth')",0
+"('MFA_coverage', 'uptime')",0
+"('MFA_coverage', 'revenue_growth')",0
+"('backup_success_rate', 'uptime')",0
+"('backup_success_rate', 'revenue_growth')",0
